@@ -1,4 +1,5 @@
-# SharePoint Recycle Bin Helper (Graph-only, Interactive)
+# SharePoint Recycle Bin Helper (Graph-only, Interactive) - Mirage cyber range helper
+## LLM generated
 
 Interactive CLI tool to **list** and **restore** SharePoint files deleted from Microsoft Teams channels — using **only** a Microsoft Graph access token.
 
