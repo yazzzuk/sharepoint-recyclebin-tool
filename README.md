@@ -25,3 +25,16 @@ Interactive CLI tool to **list** and **restore** SharePoint files deleted from M
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
+```
+
+## Fetch Microsoft Graph access token
+GRAPH_TOKEN="$(az account get-access-token --resource-type ms-graph --query accessToken -o tsv)"
+
+## Option A: paste token when prompted
+python sp_rb_interactive.py
+
+## Option B: pass token via flag
+python sp_rb_interactive.py --graph-token "$GRAPH_TOKEN"
+
+## Option C: use environment variable
+GRAPH_TOKEN="$GRAPH_TOKEN" python sp_rb_interactive.py
