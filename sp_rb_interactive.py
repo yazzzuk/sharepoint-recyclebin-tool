@@ -8,12 +8,11 @@
 #  - Resolve Site (ID + URL)
 #  - List recycle-bin items (with deletedFromLocation) -> pick number
 #  - Restore via batch endpoint (POST /beta/sites/{siteId}/recycleBin/items/restore)
-#  - Poll for reappearance, then download to current dir
+#  - Poll for reappearance (handles conflict renames), then download to current dir
 #
 # Requirements: pip install requests
 
 import argparse
-import json
 import os
 import re
 import sys
@@ -38,7 +37,7 @@ def gpost_json(url, tok, body):
     # Accept 200/201/202/204/207; 207 is normal for batch restore
     h = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
     r = requests.post(url, headers=h, json=body, timeout=30)
-    if r.status_code not in (200,201,202,204,207):
+    if r.status_code not in (200, 201, 202, 204, 207):
         raise RuntimeError(f"[POST] {r.status_code} {url}\n{r.text}")
     return r.json() if r.text else {}
 
@@ -174,40 +173,48 @@ def download_file(site_id, tok, drive_item, out_dir="."):
                 f.write(chunk)
     return local
 
-def wait_for_file(site_id, tok, drive_rel_path, name, attempts=6, sleep_sec=2):
+def wait_for_file(site_id, tok, drive_rel_path, name, attempts=20, sleep_sec=3):
     """
-    Poll for the restored file to appear (eventual consistency).
+    Poll for the restored file to appear (eventual consistency + conflict rename).
     Strategy per attempt:
-     1) exact path,
-     2) list folder + pick newest candidate,
-     3) whole-drive search (preferring expected parent path).
+      1) exact path
+      2) list folder (prefer newest, case-insensitive name match incl. conflict copies)
+      3) whole-drive search (prefer expected parent path)
     """
+    base = name.rsplit(".", 1)[0].lower()
     for _ in range(attempts):
-        # 1) exact
+        # 1) exact path
         item = get_drive_item_by_exact_path(site_id, tok, drive_rel_path, name)
         if item:
             return item
-        # 2) folder listing
+
+        # 2) folder listing (catch conflict-renamed like 'config (1).txt')
         children = list_children(site_id, tok, drive_rel_path) if drive_rel_path else []
         if children:
-            base = name.rsplit(".", 1)[0]
-            cand = [c for c in children if isinstance(c.get("name"), str) and (c["name"] == name or c["name"].startswith(base))]
-            cand.sort(key=lambda c: c.get("lastModifiedDateTime", ""), reverse=True)
-            if cand:
-                return cand[0]
+            cands = []
+            for c in children:
+                nm = (c.get("name") or "")
+                nml = nm.lower()
+                if nml == name.lower() or nml.startswith(base):
+                    cands.append(c)
+            if cands:
+                cands.sort(key=lambda c: c.get("lastModifiedDateTime", ""), reverse=True)
+                return cands[0]
+
         # 3) whole-drive search
         results = search_by_name(site_id, tok, name)
         if results:
             if drive_rel_path:
-                pref = []
+                prefer = []
                 enc = drive_rel_path.replace(" ", "%20")
                 for r in results:
                     p = (r.get("parentReference") or {}).get("path") or ""
                     if enc in p or drive_rel_path in urllib.parse.unquote(p):
-                        pref.append(r)
-                results = pref or results
+                        prefer.append(r)
+                results = prefer or results
             results.sort(key=lambda r: r.get("lastModifiedDateTime", ""), reverse=True)
             return results[0]
+
         time.sleep(sleep_sec)
     return None
 
@@ -277,7 +284,7 @@ def main():
     loc    = item.get("deletedFromLocation") or ""
     drive_rel = derive_drive_rel_path(loc)
 
-    # 5) Restore via batch endpoint (your working pattern)
+    # 5) Restore via batch endpoint
     print(f"\nRestoring: {fname}  (id={rb_id})")
     resp = batch_restore(site_id, token, [rb_id])
     echoed = [x.get("id") for x in (resp.get("value", []) if isinstance(resp, dict) else [])]
@@ -286,9 +293,12 @@ def main():
     else:
         print("[warn] Restore requested; API did not echo id (can be normal).")
 
-    # 6) Verify + Download with polling
+    # Give SPO a moment before first lookup
+    time.sleep(3)
+
+    # 6) Verify + Download with polling (longer window + conflict rename aware)
     print("\nVerifying restore and downloading the file (best effort)...")
-    drive_item = wait_for_file(site_id, token, drive_rel, fname, attempts=6, sleep_sec=2)
+    drive_item = wait_for_file(site_id, token, drive_rel, fname, attempts=20, sleep_sec=3)
 
     if drive_item:
         # parentReference.path like: /drive/root:/Shared%20Documents/Platform%20architecture/Processes
@@ -312,6 +322,17 @@ def main():
         if drive_rel:
             print(f"[warn] Could not resolve restored file metadata yet.")
             print(f"[info] Expected folder (from metadata): {drive_rel}/{fname}")
+            # Show current folder contents to help spot conflict-renamed files
+            try:
+                children = list_children(site_id, token, drive_rel)
+                if children:
+                    print("[info] Current items in folder:")
+                    for c in children:
+                        nm = c.get('name')
+                        if nm:
+                            print(f"  - {nm}")
+            except Exception as e:
+                print(f"[debug] Failed to list folder contents: {e}")
         else:
             print("[warn] Could not resolve restored file metadata to download.")
     print("\nDone.")
